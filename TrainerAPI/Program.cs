@@ -11,7 +11,8 @@ namespace TrainerAPI
     {
         // Cycling Power Service UUIDs
         private static readonly Guid CYCLING_POWER_SERVICE_UUID = new Guid("00001818-0000-1000-8000-00805f9b34fb");
-        private static readonly Guid CYCLING_POWER_MEASUREMENT_CHARACTERISTIC_UUID = new Guid("00002a63-0000-1000-8000-00805f9b34fb");
+        private static readonly Guid CYCLING_POWER_MEASUREMENT_CHARACTERISTIC_UUID = new Guid("00002A63-0000-1000-8000-00805f9b34fb");
+        private static readonly Guid CYCLING_POWER_CONTROL_POINT_CHARACTERISTIC_UUID = new Guid("00002A66-0000-1000-8000-00805f9b34fb");
 
         static async Task Main(string[] args)
         {
@@ -19,18 +20,80 @@ namespace TrainerAPI
             
             try
             {
-                // Query for Bluetooth LE devices
-                string selector = BluetoothLEDevice.GetDeviceSelector();
-                DeviceInformationCollection devices = await DeviceInformation.FindAllAsync(selector);
+                // Query for all Bluetooth LE devices
+                string[] requestedProperties = { "System.Devices.Aep.DeviceAddress", "System.Devices.Aep.IsConnected" };
+                string aqsFilter = "(System.Devices.Aep.ProtocolId:=\"{bb7bb05e-5972-42b5-94fc-76eaa7084d49}\")";
+                
+                DeviceInformationCollection devices = null;
+                int retryCount = 0;
+                const int maxRetries = 5;  // Increased retries
+
+                while (devices == null || devices.Count == 0 && retryCount < maxRetries)
+                {
+                    Console.WriteLine($"Scanning for devices (attempt {retryCount + 1}/{maxRetries})...");
+                    devices = await DeviceInformation.FindAllAsync(
+                        aqsFilter,
+                        requestedProperties,
+                        DeviceInformationKind.AssociationEndpoint);
+                    
+                    if (devices.Count == 0)
+                    {
+                        retryCount++;
+                        Console.WriteLine("No devices found, waiting 3 seconds before retry...");
+                        await Task.Delay(3000); // Increased delay to 3 seconds
+                    }
+                    else
+                    {
+                        Console.WriteLine($"Found {devices.Count} Bluetooth LE devices:");
+                        foreach (var device in devices)
+                        {
+                            Console.WriteLine($"- {device.Name}");
+                        }
+                    }
+                }
 
                 BluetoothLEDevice trainerDevice = null;
                 foreach (DeviceInformation device in devices)
                 {
-                    Console.WriteLine($"Found device: {device.Name}");
-                    if (device.Name.Contains("Suito-T", StringComparison.OrdinalIgnoreCase))
+                    // Elite trainers might show up as "ELITE_" or just "Suito"
+                    if (device.Name?.Contains("ELITE_", StringComparison.OrdinalIgnoreCase) == true ||
+                        device.Name?.Contains("Suito", StringComparison.OrdinalIgnoreCase) == true)
                     {
-                        trainerDevice = await BluetoothLEDevice.FromIdAsync(device.Id);
-                        break;
+                        Console.WriteLine($"\nFound potential trainer: {device.Name}");
+                        Console.WriteLine($"Device ID: {device.Id}");
+                        Console.WriteLine("Attempting to connect...");
+                        
+                        try
+                        {
+                            trainerDevice = await BluetoothLEDevice.FromIdAsync(device.Id);
+                            if (trainerDevice != null)
+                            {
+                                Console.WriteLine($"Connection status: {trainerDevice.ConnectionStatus}");
+                                
+                                // Try to get services to verify it's really connected
+                                var initialServicesResult = await trainerDevice.GetGattServicesAsync();
+                                if (initialServicesResult.Status == GattCommunicationStatus.Success)
+                                {
+                                    Console.WriteLine("Successfully connected to device!");
+                                    break;
+                                }
+                                else
+                                {
+                                    Console.WriteLine($"Failed to get services: {initialServicesResult.Status}");
+                                    trainerDevice.Dispose();
+                                    trainerDevice = null;
+                                }
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            Console.WriteLine($"Error connecting to device: {ex.Message}");
+                            if (trainerDevice != null)
+                            {
+                                trainerDevice.Dispose();
+                                trainerDevice = null;
+                            }
+                        }
                     }
                 }
 
@@ -41,6 +104,15 @@ namespace TrainerAPI
                 }
 
                 Console.WriteLine("Connected to Suito-T trainer. Reading power data...");
+
+                if (trainerDevice != null)
+                {
+                    Console.WriteLine($"Device Information:");
+                    Console.WriteLine($"- Name: {trainerDevice.Name}");
+                    Console.WriteLine($"- Connection Status: {trainerDevice.ConnectionStatus}");
+                    Console.WriteLine($"- Device Id: {trainerDevice.DeviceId}");
+                    Console.WriteLine($"- Bluetooth Address: {trainerDevice.BluetoothAddress}");
+                }
 
                 // Get the Cycling Power Service
                 GattDeviceServicesResult servicesResult = await trainerDevice.GetGattServicesAsync();
